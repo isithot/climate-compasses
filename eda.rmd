@@ -1,0 +1,259 @@
+---
+title: "Climate Compasses"
+author:
+- name: James Goldie
+- url: https://rensa.co
+params:
+  station_name: "MELBOURNE REGIONAL OFFICE"
+output:
+  html_document:
+    df_print: paged
+subtitle: EDA Notebook
+---
+
+The idea here is to bring in a set of station observations (I'm thinking [HadISD](https://www.metoffice.gov.uk/hadobs/hadisd/) at this point), split by month and hour of the day, calculate anomalies from each group's 
+
+```{r setup}
+
+options(error = function() {
+  # delete temp file (compressed and uncomressed), if they exist
+  if (exists('ncdf_temp')) {
+    unlink(ncdf_temp)
+    unlink(ncdf_temp %>% str_replace('.gz', ''))
+  }
+  
+  recover()
+})
+
+library(tidyverse)
+library(ncdf4)
+library(R.utils)
+library(lubridate)
+library(magrittr)
+library(stringr)
+library(skimr)
+
+filter = dplyr::filter
+select = dplyr::select
+```
+
+```{r import}
+
+station_directory =
+  read_table(
+    'https://www.metoffice.gov.uk/hadobs/hadisd/v202_2017f/files/hadisd_station_fullinfo_v202.txt',
+    col_names = c('id', 'name', 'lat', 'lon', 'unknown', 'date_start', 'date_end'),
+    col_types = 'ccdddDD') %>%
+  filter(name == params$station_name)
+
+print(station_directory)
+
+if (nrow(station_directory) == 0) {
+  stop('Station name not found')
+} else if (nrow(station_directory) > 1) {
+  stop('Multiple stations found')
+}
+
+# get the obs file, decompress it and load it in
+ncdf_temp = tempfile(pattern = 'compass-', fileext = '.nc.gz')
+download.file(
+  url = paste0(
+    'https://www.metoffice.gov.uk/hadobs/hadisd/v202_2017f/data/hadisd.2.0.2.2017f_19310101-20171231_',
+    station_directory %>% pull(id),
+    '.nc.gz'),
+  destfile = ncdf_temp)
+gunzip(ncdf_temp)
+ncdf_temp %<>% str_replace('.gz', '')
+
+ncfile = nc_open(ncdf_temp)
+ncfile
+```
+
+```{r tidy}
+
+epoch =
+  ncatt_get(ncfile, 'time', 'units')$value %>%
+  str_replace('hours since ', '')
+
+# i want a data frame of time, temperatures, windspeeds and winddirs
+obs =
+  data_frame(
+    time = ncfile %>% ncvar_get('time'),
+    temp = ncfile %>% ncvar_get('temperatures'),
+    ws = ncfile %>% ncvar_get('windspeeds'),
+    wd = ncfile %>% ncvar_get('winddirs')) %>%
+  # convert flagged/missing values to NA
+  mutate(
+    temp = temp %>%
+      na_if(ncatt_get(ncfile, 'temperatures', 'missing_value')$value) %>%
+      na_if(ncatt_get(ncfile, 'temperatures', 'flagged_value')$value),
+    ws = ws %>%
+      na_if(ncatt_get(ncfile, 'windspeeds', 'missing_value')$value) %>%
+      na_if(ncatt_get(ncfile, 'windspeeds', 'flagged_value')$value),
+    wd = wd %>%
+      na_if(ncatt_get(ncfile, 'winddirs', 'missing_value')$value) %>%
+      na_if(ncatt_get(ncfile, 'winddirs', 'flagged_value')$value)) %>%
+  mutate(time = ymd_hm(epoch) + hours(time)) %T>%
+  print()
+
+```
+# Exploratory analysis
+
+Let's have a look at a basic time series and histogram of each variable:
+
+```{r eda-ungrouped}
+
+obs %>%
+  gather(key = 'variable', value = 'value', -time) %>%
+  {
+    ggplot(., aes(x = time, y = value)) +
+    geom_point(size = 0.5, alpha = 0.5) +
+    facet_wrap(~ variable, ncol = 1, scales = 'free')
+  }
+
+obs %>%
+  gather(key = 'variable', value = 'value', -time) %>%
+  {
+    ggplot(., aes(x = value, y = stat(density))) +
+    geom_histogram() +
+    facet_wrap(~ variable, ncol = 1, scales = 'free')
+  }
+
+```
+
+Based on this, I'm going to limit my analysis to the 1990–1998 period (not sure what's happening after 2000 with wind speed; maybe they switched to a Stevenson screen?)
+
+Okay, now I'm going to break this thing up by hour of the day and month, and I'm going to calculate temperature anomalies. Then we can start seeing how things vary:
+
+```{r calc-anomalies}
+
+obs_focus =
+  obs %>%
+  filter(time > as.Date('1991-02-01'), time < as.Date('1999-01-31')) %>%
+  filter_all(all_vars(!is.na(.))) %>%
+  mutate(
+    time_hour = hour(time),
+    time_month = month(time) %>% factor(levels = 1:12, labels = month.name)) %>%
+  group_by(time_hour, time_month) %>%
+  mutate(
+    temp_anomaly = temp - mean(temp, na.rm = TRUE),
+    temp_deviation =
+      (temp - mean(temp, na.rm = TRUE)) /
+      sd(temp, na.rm = TRUE)) %>%
+  ungroup() %T>%
+  print()
+
+```
+
+Okay, let's see what these anomalies look like when we throw all the groups together. Hopefully, something coherent comes out right away, and I don't have to make different plots for different seasons/times!
+
+```{r anomaly-viz}
+
+# overall plot
+obs_focus %>%
+{
+  ggplot(.) +
+    geom_jitter(
+      aes(x = wd, y = ws, colour = temp_deviation),
+      size = 2, alpha = 0.75) +
+    scale_colour_gradient2(
+      low = scales::muted('blue'),
+      mid = '#ffffff00',
+      high = scales::muted('red')) +
+    labs(
+      x = 'Wind direction',
+      y = 'Wind speed (m/s)',
+      title = 'Temperature deviations according to the wind')
+}
+
+# facetted by hour of the day
+obs_focus %>%
+{
+  ggplot(.) +
+    geom_jitter(
+      aes(x = wd, y = ws, colour = temp_deviation),
+      size = 2, alpha = 0.75) +
+    facet_wrap(~ time_hour, ncol = 6) +
+    scale_colour_gradient2(
+      low = scales::muted('blue'),
+      mid = '#ffffff00',
+      high = scales::muted('red')) +
+    labs(
+      x = 'Wind direction',
+      y = 'Wind speed (m/s)',
+      title = 'Temperature deviations according to the wind',
+      subtitle = 'Grouped by hour of the day (UTC)')
+}
+
+# facetted by month of the year
+obs_focus %>%
+{
+  ggplot(.) +
+    geom_jitter(
+      aes(x = wd, y = ws, colour = temp_deviation),
+      size = 2, alpha = 0.75) +
+    facet_wrap(~ time_month, ncol = 4) +
+    scale_colour_gradient2(
+      low = scales::muted('blue'),
+      mid = '#ffffff00',
+      high = scales::muted('red')) +
+    labs(
+      x = 'Wind direction',
+      y = 'Wind speed (m/s)',
+      title = 'Temperature deviations according to the wind',
+      subtitle = 'Grouped by month of the year')
+}
+```
+# Compass plot
+
+Okay, let's give this a go! There are some slight shifts by hour and month, but nothing too bad IMO.
+
+```{r compass}
+
+obs_focus %>%
+{
+  ggplot(.) +
+    geom_point(
+      aes(x = wd, y = ws, colour = temp_anomaly),
+      size = 1.5) +
+    coord_polar(theta = 'x') +
+    annotate(geom = 'text', x = 0, y = -5, label = 'Melbourne') +
+    scale_x_continuous(
+      limits = c(0, 360),
+      breaks = seq(0, 315, by = 45),
+      labels = c('N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW')) +
+    scale_y_continuous(
+      limits = c(-5, 10),
+      breaks = c(5)) +
+    scale_colour_gradient2(
+      low = scales::muted('blue'),
+      mid = '#ffffff00',
+      high = scales::muted('red')) +
+    guides(colour = 'none') +
+    theme_minimal() +
+    theme(
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      panel.grid.major.y = element_line(linetype = 'dashed'),
+      panel.grid.minor.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      axis.text.y = element_blank()) +
+    labs(
+      x = NULL,
+      y = NULL,
+      title = 'Hot and cold in Melbourne, according to the wind',
+      subtitle = 'Selected period: 1990–1998',
+      caption = 'Data from HadISD (Dunn et al. 2012)')
+}
+```
+
+That looks pretty cool! The question is, if I wanted to do this for _any_ HadISD station on-demand, what sort of data quality checking would I need to do to make them fairly robust?
+
+Potential problems:
+
+1. **Selecting a period with continuous data.** Maybe, when I'm doing the grouping, I could get a summary of the row counts and drop groups with too few? If I also grouped by year or decade, that might help with the time series problems.
+2. **Determining whether months/hours can be thrown together.** This would require some statistical comparison of the groups, I think. Maybe something like a chi-square test, where I'd compare the proportions across groups? Need to do some reading here.
+
+# References
+
+Climate Compaasses uses the HadISD 2.0.2.2017f dataset under a [Non-Commerical Government Licence](https://www.metoffice.gov.uk/hadobs/hadisd/terms_and_conditions.html). For more information about HadISD, refer to [Dunn et al (2012)](http://www.clim-past-discuss.net/8/1763/2012/cpd-8-1763-2012.html), [Dunn et al (2014)](http://www.clim-past.net/10/1501/2014/cp-10-1501-2014.html), [Dunn et al (2016)](http://www.geosci-instrum-method-data-syst.net/5/473/2016/) and [Smith et al (2011)](http://journals.ametsoc.org/doi/abs/10.1175/2011BAMS3015.1).
