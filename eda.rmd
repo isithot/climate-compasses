@@ -15,16 +15,6 @@ The idea here is to bring in a set of station observations (I'm thinking [HadISD
 
 ```{r setup}
 
-options(error = function() {
-  # delete temp file (compressed and uncomressed), if they exist
-  if (exists('ncdf_temp')) {
-    unlink(ncdf_temp)
-    unlink(ncdf_temp %>% str_replace('.gz', ''))
-  }
-  
-  recover()
-})
-
 library(tidyverse)
 library(ncdf4)
 library(R.utils)
@@ -210,11 +200,20 @@ Okay, let's give this a go! There are some slight shifts by hour and month, but 
 
 ```{r compass}
 
+jitter_width = 4
+colour_low = '#2166ac'    # blue
+# colour_low = '#4d4d4d'    # dark grey
+colour_mid = '#f7f7f7'    # white
+colour_high = '#d73027'   # red
+
 obs_focus %>%
+  # manually jitter and clamp to (0, 360)
+  mutate(wd_jittered =
+    (wd + runif(wd, min = -jitter_width, max = jitter_width)) %% 360) %>%
 {
   ggplot(.) +
     geom_point(
-      aes(x = wd, y = ws, colour = temp_anomaly),
+      aes(x = wd_jittered, y = ws, colour = temp_anomaly, alpha = temp_anomaly ^ 5),
       size = 1.5) +
     coord_polar(theta = 'x') +
     annotate(geom = 'text', x = 0, y = -5, label = 'Melbourne') +
@@ -222,14 +221,10 @@ obs_focus %>%
       limits = c(0, 360),
       breaks = seq(0, 315, by = 45),
       labels = c('N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW')) +
-    scale_y_continuous(
-      limits = c(-5, 10),
-      breaks = c(5)) +
-    scale_colour_gradient2(
-      low = scales::muted('blue'),
-      mid = '#ffffff00',
-      high = scales::muted('red')) +
-    guides(colour = 'none') +
+    scale_y_continuous(limits = c(-5, 10), breaks = c(5)) +
+    scale_colour_gradient2(low = colour_low, mid = colour_mid, high = colour_high) +
+    scale_alpha_continuous() +
+    # guides(colour = 'none') +
     theme_minimal() +
     theme(
       panel.grid.major.x = element_blank(),
